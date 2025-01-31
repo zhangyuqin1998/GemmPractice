@@ -20,7 +20,7 @@ for filename in os.listdir(log_directory):
             data[filename] = file_data
 
 plt.figure(figsize=(10, 6))
-print(data)
+
 for file, file_data in data.items():
     plt.plot(file_data, label=f'{file}')
 

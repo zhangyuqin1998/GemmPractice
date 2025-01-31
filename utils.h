@@ -35,7 +35,7 @@ void gemmBaselineCPU(const float* A, const float* B, float* C, uint64_t m, uint6
     }
 }
 
-__global__ void gemmBaselineGPU(float *A, float *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
+__global__ void gemmBaselineGPU(const float *A, const float *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
     uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
     uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -68,8 +68,8 @@ class GemmBase {
     virtual ~GemmBase() {}
 
     virtual void LaunchKernel(
-        float *d_A,
-        float *d_B,
+        const float *d_A,
+        const float *d_B,
         float *d_C,
         uint64_t m, uint64_t n, uint64_t k) = 0;
 

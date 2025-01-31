@@ -12,3 +12,5 @@ endfunction()
 
 add_gemm_executable(gemm_cuda_core_1 gemm_cuda_core_1.cu)
 add_gemm_executable(gemm_cuda_core_2 gemm_cuda_core_2.cu)
+add_gemm_executable(gemm_cuda_core_3 gemm_cuda_core_3.cu)
+add_gemm_executable(gemm_cuda_core_4 gemm_cuda_core_4.cu)

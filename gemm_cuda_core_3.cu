@@ -4,6 +4,12 @@
 
 constexpr uint64_t TILE_SIZE = 16;
 
+
+template <class T>
+__device__ void LDVectorized(float *dst, const float *src) {
+    *(reinterpret_cast<T*>(dst)) = *(reinterpret_cast<const T*>(src));
+}
+
 __global__ void Kernel(const float *A, const float *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
     __shared__ float s_A[TILE_SIZE][TILE_SIZE];
     __shared__ float s_B[TILE_SIZE][TILE_SIZE];
@@ -13,13 +19,25 @@ __global__ void Kernel(const float *A, const float *B, float *C, uint64_t m, uin
 
     float sum = 0.0f;
     for (uint64_t k_tile = 0; k_tile < k; k_tile += TILE_SIZE) {
-        s_A[threadIdx.y][threadIdx.x] = A[y * k + k_tile + threadIdx.x];
-        s_B[threadIdx.x][threadIdx.y] = B[x * k + k_tile + threadIdx.y];
+        if (threadIdx.x < TILE_SIZE / 4) {
+            LDVectorized<float4>(&(s_A[threadIdx.y][threadIdx.x * 4]), &(A[y * k + k_tile + threadIdx.x * 4]));
+        }
+        if (threadIdx.y < TILE_SIZE / 4) {
+            LDVectorized<float4>(&(s_B[threadIdx.x][threadIdx.y * 4]), &(B[x * k + k_tile + threadIdx.y * 4]));
+        }
         __syncthreads();
 
         if (y < m && x < n) {
-            for (uint64_t t = 0; t < TILE_SIZE; ++t) {
-                sum += s_A[threadIdx.y][t] * s_B[threadIdx.x][t];
+#pragma unroll 4
+            for (uint64_t t = 0; t < TILE_SIZE; t += 4) {
+                float f_A[4];
+                float f_B[4];
+                LDVectorized<float4>(f_A, &(s_A[threadIdx.y][t])); 
+                LDVectorized<float4>(f_B, &(s_B[threadIdx.x][t]));
+#pragma unroll 4
+                for (uint64_t i = 0; i < 4; ++i) {
+                    sum += f_A[i] * f_B[i];
+                }
             }
         }
         __syncthreads();
@@ -30,7 +48,7 @@ __global__ void Kernel(const float *A, const float *B, float *C, uint64_t m, uin
     }
 }
 
-class GemmCudaCore_2 : public GemmBase {
+class GemmCudaCore_3 : public GemmBase {
  public:
     using GemmBase::GemmBase; // 继承基类的构造函数
 
@@ -50,8 +68,8 @@ class GemmCudaCore_2 : public GemmBase {
 
 
 int main() {
-    // 使用共享内存
-    GemmCudaCore_2 gemm("GemmCudaCore_2");
+    // 向量化读gmem
+    GemmCudaCore_3 gemm("GemmCudaCore_3");
     // mxnxk
     gemm.RunProfile(128, 128, 128);
     gemm.RunProfile(128, 256, 256);
