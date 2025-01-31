@@ -16,18 +16,18 @@
 
 
 // Initialize matrix with random values
-void initMatrix(float* matrix, int size) {
-    for (int i = 0; i < size; ++i) {
+void initMatrix(float* matrix, uint64_t size) {
+    for (uint64_t i = 0; i < size; ++i) {
         matrix[i] = static_cast<float>(rand()) / RAND_MAX;
     }
 }
 
 // CPU implementation of matrix multiplication for verification
-void gemmCPU(const float* A, const float* B, float* C, int m, int n, int k) {
-    for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < n; ++j) {
-            float sum = 0.0f;
-            for (int t = 0; t < k; ++t) {
+void gemmBaselineCPU(const float* A, const float* B, float* C, uint64_t m, uint64_t n, uint64_t k) {
+    for (uint64_t i = 0; i < m; ++i) {
+        for (uint64_t j = 0; j < n; ++j) {
+            double sum = 0.0f;
+            for (uint64_t t = 0; t < k; ++t) {
                 sum += A[i * k + t] * B[j * k + t];
             }
             C[i * n + j] = sum;
@@ -35,9 +35,22 @@ void gemmCPU(const float* A, const float* B, float* C, int m, int n, int k) {
     }
 }
 
+__global__ void gemmBaselineGPU(float *A, float *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
+    uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (y < m && x < n) {
+        float sum = 0.0f;
+        for (uint64_t t = 0; t < k; ++t) {
+            sum += A[y * k + t] * B[x * k + t];
+        }
+        C[y * n + x] = sum;
+    }
+}
+
 // Compare two matrices
-bool compareMatrices(const float* mat1, const float* mat2, int size, float tolerance = 1e-3) {
-    for (int i = 0; i < size; ++i) {
+bool compareMatrices(const float* mat1, const float* mat2, uint64_t size, float tolerance = 1e-3) {
+    for (uint64_t i = 0; i < size; ++i) {
         if (fabs(mat1[i] - mat2[i]) > tolerance) {
             std::cout << "Matrices differ at " << i << ", mat1[i]=" << mat1[i] << ",mat2[i]=" << mat2[i];
             std::cout << ", diff=" << fabs(mat1[i] - mat2[i]) << std::endl;
@@ -58,12 +71,13 @@ class GemmBase {
         float *d_A,
         float *d_B,
         float *d_C,
-        int m, int n, int k) = 0;
+        uint64_t m, uint64_t n, uint64_t k) = 0;
 
-    void RunProfile(int m, int n, int k) {
+    void RunProfile(uint64_t m, uint64_t n, uint64_t k) {
         float* d_A;
         float* d_B;
         float* d_C;
+        float* d_C_ref;
         float* h_A = new float[m * k];
         float* h_B = new float[n * k];
         float* h_C = new float[m * n];
@@ -72,15 +86,16 @@ class GemmBase {
         CHECKCUDA(cudaMalloc(&d_A, m * k * sizeof(float)));
         CHECKCUDA(cudaMalloc(&d_B, n * k * sizeof(float)));
         CHECKCUDA(cudaMalloc(&d_C, m * n * sizeof(float)));
+        CHECKCUDA(cudaMalloc(&d_C_ref, m * n * sizeof(float)));
 
-        srand(time(nullptr));
+        srand(42);
         initMatrix(h_A, m * k);
         initMatrix(h_B, n * k);
 
         CHECKCUDA(cudaMemcpy(d_A, h_A, m * k * sizeof(float), cudaMemcpyHostToDevice));
         CHECKCUDA(cudaMemcpy(d_B, h_B, n * k * sizeof(float), cudaMemcpyHostToDevice));
 
-        for (int i = 0; i < 10; ++i) {
+        for (uint64_t i = 0; i < 10; ++i) {
             // warm up
             LaunchKernel(d_A, d_B, d_C, m, n, k);
         }
@@ -91,7 +106,7 @@ class GemmBase {
 
          // Start recording
         CHECKCUDA(cudaEventRecord(start));
-        for (int i = 0; i < 10; ++i) {
+        for (uint64_t i = 0; i < 10; ++i) {
             LaunchKernel(d_A, d_B, d_C, m, n, k);
         }
         CHECKCUDA(cudaGetLastError());
@@ -103,19 +118,22 @@ class GemmBase {
         // Calculate elapsed time
         float milliseconds = 0;
         CHECKCUDA(cudaEventElapsedTime(&milliseconds, start, stop));
-        std::cout << "Kernel " << name << ", shape=" << m << "x" << n << "x" << k << " execution time: " << milliseconds << " ms" << std::endl;
+
+        // Compute reference result on GPU
+        dim3 baseline_blockdim(16, 16);
+        dim3 baseline_griddim((n + baseline_blockdim.x - 1) / baseline_blockdim.x,
+                        (m + baseline_blockdim.y - 1) / baseline_blockdim.y);
+        gemmBaselineGPU<<<baseline_griddim, baseline_blockdim>>>(d_A, d_B, d_C_ref, m, n, k);
 
         // Copy result back to host
         CHECKCUDA(cudaMemcpy(h_C, d_C, m * n * sizeof(float), cudaMemcpyDeviceToHost));
+        CHECKCUDA(cudaMemcpy(h_C_ref, d_C_ref, m * n * sizeof(float), cudaMemcpyDeviceToHost));
 
-        // Compute reference result on CPU
-        gemmCPU(h_A, h_B, h_C_ref, m, n, k);
-
+        float gflops = (float)(m * n * k * 2) / (milliseconds / 10.f) / 1e6f;
         // Compare results
         if (compareMatrices(h_C, h_C_ref, m * n)) {
-            // std::cout << "Results of " << name << " are correct!" << std::endl;
-        } else {
-            std::cout << "Results of " << name << " are incorrect!" << std::endl;
+            std::cout << "Kernel " << name << ", shape=" << m << "x" << n << "x" << k;
+            std::cout << " execution time: " << milliseconds << " ms, " << "gflops: " << gflops << std::endl;
         }
 
         // Clean up
@@ -129,6 +147,7 @@ class GemmBase {
         CHECKCUDA(cudaFree(d_A));
         CHECKCUDA(cudaFree(d_B));
         CHECKCUDA(cudaFree(d_C));
+        CHECKCUDA(cudaFree(d_C_ref));
     }
 
  protected:
