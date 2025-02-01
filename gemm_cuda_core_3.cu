@@ -22,8 +22,8 @@ __global__ void Kernel(const float *A, const float *B, float *C, uint64_t m, uin
         if (threadIdx.x < TILE_SIZE / 4) {
             LDVectorized<float4>(&(s_A[threadIdx.y][threadIdx.x * 4]), &(A[y * k + k_tile + threadIdx.x * 4]));
         }
-        if (threadIdx.y < TILE_SIZE / 4) {
-            LDVectorized<float4>(&(s_B[threadIdx.x][threadIdx.y * 4]), &(B[x * k + k_tile + threadIdx.y * 4]));
+        if (threadIdx.x < TILE_SIZE / 4) {
+            LDVectorized<float4>(&(s_B[threadIdx.y][threadIdx.x * 4]), &(B[(blockIdx.x * blockDim.x + threadIdx.y) * k + k_tile + threadIdx.x * 4]));
         }
         __syncthreads();
 
@@ -68,7 +68,7 @@ class GemmCudaCore_3 : public GemmBase {
 
 
 int main() {
-    // 向量化读gmem
+    // 向量化读gmem+合并访存
     GemmCudaCore_3 gemm("GemmCudaCore_3");
     // mxnxk
     gemm.RunProfile(128, 128, 128);
