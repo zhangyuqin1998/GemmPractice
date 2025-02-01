@@ -2,16 +2,16 @@
 
 #include "utils.h"
 
-__global__ void Kernel(const float *A, const float *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
+__global__ void Kernel(const half *A, const half *B, half *C, uint64_t m, uint64_t n, uint64_t k) {
     uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
     uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (y < m && x < n) {
-        float sum = 0.0f;
+        half sum = 0.0f;
         for (uint64_t t = 0; t < k; ++t) {
-            sum += A[y * k + t] * B[x * k + t];
+            sum += (A[y * k + t] * B[x * k + t]);
         }
-        C[y * n + x] = sum;
+        C[y * n + x] = (sum);
     }
 }
 
@@ -20,9 +20,9 @@ class GemmCudaCore_1 : public GemmBase {
     using GemmBase::GemmBase; // 继承基类的构造函数
 
     void LaunchKernel(
-        const float *d_A,
-        const float *d_B,
-        float *d_C, 
+        const half *d_A,
+        const half *d_B,
+        half *d_C, 
         uint64_t m, uint64_t n, uint64_t k) override
 {
         dim3 blockdim(16, 16);
