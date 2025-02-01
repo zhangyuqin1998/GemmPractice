@@ -23,14 +23,14 @@ struct Swizzle
     }
 };
 
-__global__ void Kernel(const half *A, const half *B, half *C, uint64_t m, uint64_t n, uint64_t k) {
+__global__ void Kernel(const half *A, const half *B, float *C, uint64_t m, uint64_t n, uint64_t k) {
     __shared__ half s_A[TILE_SIZE][TILE_SIZE];
     __shared__ half s_B[TILE_SIZE][TILE_SIZE];
 
     uint64_t y = blockIdx.y * blockDim.y + threadIdx.y;
     uint64_t x = blockIdx.x * blockDim.x + threadIdx.x;
 
-    half sum = 0.0f;
+    float sum = 0.0f;
     for (uint64_t k_tile = 0; k_tile < k; k_tile += TILE_SIZE) {
         if (threadIdx.x < TILE_SIZE / 8) {
             uint64_t new_offset = Swizzle<2, 3, 3>::apply(threadIdx.x * 8, threadIdx.y, TILE_SIZE, TILE_SIZE);
@@ -53,7 +53,7 @@ __global__ void Kernel(const half *A, const half *B, half *C, uint64_t m, uint64
                 LDVectorized<float4>(f_B, &(s_B[new_offset_sb / TILE_SIZE][new_offset_sb % TILE_SIZE])); 
 #pragma unroll
                 for (uint64_t i = 0; i < 8; ++i) {
-                    sum += (f_A[i] * f_B[i]);
+                    sum += __half2float(f_A[i] * f_B[i]);
                 }
             }
         }
@@ -72,7 +72,7 @@ class GemmCudaCore_4 : public GemmBase {
     void LaunchKernel(
         const half *d_A,
         const half *d_B,
-        half *d_C, 
+        float *d_C, 
         uint64_t m, uint64_t n, uint64_t k) override
 {
         dim3 blockdim(TILE_SIZE, TILE_SIZE);
