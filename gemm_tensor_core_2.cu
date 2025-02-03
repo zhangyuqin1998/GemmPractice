@@ -111,7 +111,7 @@ __global__ void Kernel(const half *A, const half *B, float *C, uint64_t m,
     cp_async_commit_group();
     cp_async_wait_group<0>();
 
-    __syncthreads();
+    // __syncthreads();
 
     uint64_t ldmatrix_sa_addr = __cvta_generic_to_shared(
         &s_A[ld_swizzled_offset / TILE_SIZE][ld_swizzled_offset % TILE_SIZE]);
@@ -165,7 +165,6 @@ int main() {
   gemm.RunProfile(1024, 256, 2048);
   gemm.RunProfile(256, 1024, 2048);
   gemm.RunProfile(2048, 2048, 2048);
-  gemm.RunProfile(4096, 4096, 4096);
 
   return 0;
 }

@@ -3,7 +3,9 @@
 
 #include "utils.h"
 
-constexpr uint64_t TILE_SIZE = 16;
+constexpr uint64_t BLOCK_TILE_SIZE = 32;
+constexpr uint64_t WARP_TILE_SIZE = 16;
+
 
 template <class T>
 __device__ __inline__ void STVectorized(float *dst, const float *src) {
@@ -68,10 +70,11 @@ __device__ __inline__ void mma16x16x16(FragmentA frag_a, FragmentB frag_b,
 
 __global__ void Kernel(const half *A, const half *B, float *C, uint64_t m,
                        uint64_t n, uint64_t k) {
+  const size_t warpid = threadIdx.x / 32; 
   const size_t laneid = threadIdx.x % 32;
 
-  __shared__ half s_A[2][TILE_SIZE][TILE_SIZE];
-  __shared__ half s_B[2][TILE_SIZE][TILE_SIZE];
+  __shared__ half s_A[2][BLOCK_TILE_SIZE][WARP_TILE_SIZE];
+  __shared__ half s_B[2][BLOCK_TILE_SIZE][WARP_TILE_SIZE];
 
   // 要做2次16x8x16才能得到16x16的结果, 但2次用到的A矩阵的数据是一样的
   // 所以FragmentA是一维矩阵即可
@@ -80,61 +83,69 @@ __global__ void Kernel(const half *A, const half *B, float *C, uint64_t m,
   float frag_c[2][4];
   memset(frag_c, 0, sizeof(frag_c));
 
-  uint64_t tiled_m = blockIdx.y * TILE_SIZE;
-  uint64_t tiled_n = blockIdx.x * TILE_SIZE;
+  uint64_t block_tiled_m = blockIdx.y * BLOCK_TILE_SIZE;
+  uint64_t block_tiled_n = blockIdx.x * BLOCK_TILE_SIZE;
 
   // ldmatrix指令每个线程加载8个元素, 每个matrix加载8x8个元素,
   // 一条ldmatrix最多加载4个8x8的matrix
-  uint64_t mn_in_tile = laneid / (TILE_SIZE / 8);
-  uint64_t k_in_tile = (laneid % (TILE_SIZE / 8)) * 8;
-  uint64_t m_idx = tiled_m + mn_in_tile;
-  uint64_t n_idx = tiled_n + mn_in_tile;
+  uint64_t mn_in_warp_tile = laneid / (WARP_TILE_SIZE / 8);
+  uint64_t k_in_warp_tile = (laneid % (WARP_TILE_SIZE / 8)) * 8;
 
-  uint64_t st_seizzled_offset =
-      Swizzle<2, 3, 3>::apply(k_in_tile, mn_in_tile, TILE_SIZE, TILE_SIZE);
-  uint64_t ld_swizzled_offset = Swizzle<2, 3, 3>::apply(
-      laneid / 16 * 8, laneid % 16, TILE_SIZE, TILE_SIZE);
-  uint64_t st_seizzled_y = st_seizzled_offset / TILE_SIZE;
-  uint64_t ld_seizzled_y = ld_swizzled_offset / TILE_SIZE;
-  uint64_t st_seizzled_x = st_seizzled_offset % TILE_SIZE;
-  uint64_t ld_seizzled_x = ld_swizzled_offset % TILE_SIZE;
+  uint64_t m_in_block_tile = warpid / (BLOCK_TILE_SIZE / WARP_TILE_SIZE) * WARP_TILE_SIZE;
+  uint64_t n_in_block_tile = warpid % (BLOCK_TILE_SIZE / WARP_TILE_SIZE) * WARP_TILE_SIZE;
 
-  auto a_src_addr = &A[(m_idx)*k + k_in_tile];
-  uint32_t sa_dst_addr = __cvta_generic_to_shared(&s_A[0][st_seizzled_y][st_seizzled_x]);
+  uint64_t m_idx = block_tiled_m + m_in_block_tile + mn_in_warp_tile;
+  uint64_t n_idx = block_tiled_n + n_in_block_tile + mn_in_warp_tile;
+
+  // uint64_t st_seizzled_offset =
+  //     Swizzle<2, 3, 3>::apply(k_in_warp_tile, m_in_block_tile + mn_in_warp_tile, WARP_TILE_SIZE, WARP_TILE_SIZE);
+  // uint64_t ld_swizzled_offset = Swizzle<2, 3, 3>::apply(
+  //     laneid / 16 * 8, laneid % 16, WARP_TILE_SIZE, WARP_TILE_SIZE);
+  // uint64_t st_seizzled_y = st_seizzled_offset / WARP_TILE_SIZE;
+  // uint64_t ld_seizzled_y = ld_swizzled_offset / WARP_TILE_SIZE;
+  // uint64_t st_seizzled_x = st_seizzled_offset % WARP_TILE_SIZE;
+  // uint64_t ld_seizzled_x = ld_swizzled_offset % WARP_TILE_SIZE;
+  uint64_t sa_st_seizzled_y = m_in_block_tile + mn_in_warp_tile;
+  uint64_t sb_st_seizzled_y = n_in_block_tile + mn_in_warp_tile;
+  uint64_t st_seizzled_x = k_in_warp_tile;
+  uint64_t sa_ld_seizzled_y = m_in_block_tile + laneid % 16;
+  uint64_t sb_ld_seizzled_y = n_in_block_tile + laneid % 16;
+  uint64_t ld_seizzled_x = laneid / 16 * 8;
+
+  auto a_src_addr = &A[(m_idx)*k + k_in_warp_tile];
+  uint32_t sa_dst_addr = __cvta_generic_to_shared(&s_A[0][sa_st_seizzled_y][st_seizzled_x]);
   cp_async_128B(sa_dst_addr, a_src_addr);
 
-  auto b_src_addr = &B[(n_idx)*k + k_in_tile];
-  uint32_t sb_dst_addr = __cvta_generic_to_shared(&s_B[0][st_seizzled_y][st_seizzled_x]);
+  auto b_src_addr = &B[(n_idx)*k + k_in_warp_tile];
+  uint32_t sb_dst_addr = __cvta_generic_to_shared(&s_B[0][sb_st_seizzled_y][st_seizzled_x]);
   cp_async_128B(sb_dst_addr, b_src_addr);
 
   cp_async_commit_group();
 
-  for (uint64_t k_tile = 0; k_tile < k; k_tile += TILE_SIZE) {
-    uint64_t k_idx = k_tile + k_in_tile + TILE_SIZE;
+  for (uint64_t k_tile = 0; k_tile < k; k_tile += WARP_TILE_SIZE) {
+    uint64_t k_idx = k_tile + k_in_warp_tile + WARP_TILE_SIZE;
     if (k_idx < k) {
       auto a_src_addr = &A[(m_idx)*k + k_idx];
       uint32_t sa_dst_addr = __cvta_generic_to_shared(
-          &s_A[((k_tile >> 4) + 1) & 1][st_seizzled_y][st_seizzled_x]);
+          &s_A[((k_tile >> 4) + 1) & 1][sa_st_seizzled_y][st_seizzled_x]);
       cp_async_128B(sa_dst_addr, a_src_addr);
 
       auto b_src_addr = &B[(n_idx)*k + k_idx];
       uint32_t sb_dst_addr = __cvta_generic_to_shared(
-          &s_B[((k_tile >> 4) + 1) & 1][st_seizzled_y][st_seizzled_x]);
+          &s_B[((k_tile >> 4) + 1) & 1][sb_st_seizzled_y][st_seizzled_x]);
       cp_async_128B(sb_dst_addr, b_src_addr);
     }
 
     cp_async_commit_group();
     cp_async_wait_group<1>();
 
-    // __syncthreads();
-
     uint64_t ldmatrix_sa_addr = __cvta_generic_to_shared(
-        &s_A[(k_tile >> 4) & 1][ld_seizzled_y][ld_seizzled_x]);
+        &s_A[(k_tile >> 4) & 1][sa_ld_seizzled_y][ld_seizzled_x]);
     ldmatrix_sync_x4_m8n8(frag_a[0], frag_a[1], frag_a[2], frag_a[3],
                           ldmatrix_sa_addr);
 
     uint64_t ldmatrix_sb_addr = __cvta_generic_to_shared(
-        &s_B[(k_tile >> 4) & 1][ld_seizzled_y][ld_seizzled_x]);
+        &s_B[(k_tile >> 4) & 1][sb_ld_seizzled_y][ld_seizzled_x]);
     ldmatrix_sync_x4_m8n8(frag_b[0][0], frag_b[1][0], frag_b[0][1],
                           frag_b[1][1], ldmatrix_sb_addr);
 
@@ -147,10 +158,14 @@ __global__ void Kernel(const half *A, const half *B, float *C, uint64_t m,
   uint64_t m_in_tile = laneid / 4;
   uint64_t n_in_tile = (laneid % 4) * 2;
 
-  STVectorized<float2>(&C[(tiled_m + m_in_tile) * n + tiled_n + n_in_tile],&frag_c[0][0]);
-  STVectorized<float2>(&C[(tiled_m + m_in_tile + 8) * n + tiled_n + n_in_tile],&frag_c[0][2]);
-  STVectorized<float2>(&C[(tiled_m + m_in_tile) * n + tiled_n + n_in_tile + 8],&frag_c[1][0]);
-  STVectorized<float2>(&C[(tiled_m + m_in_tile + 8) * n + tiled_n + n_in_tile + 8],&frag_c[1][2]);
+  STVectorized<float2>(&C[(block_tiled_m + m_in_block_tile + m_in_tile) * n +
+    block_tiled_n + n_in_block_tile + n_in_tile],&frag_c[0][0]);
+  STVectorized<float2>(&C[(block_tiled_m + m_in_block_tile + m_in_tile + 8) * n +
+    block_tiled_n + n_in_block_tile + n_in_tile],&frag_c[0][2]);
+  STVectorized<float2>(&C[(block_tiled_m + m_in_block_tile + m_in_tile) * n +
+    block_tiled_n + n_in_block_tile + n_in_tile + 8],&frag_c[1][0]);
+  STVectorized<float2>(&C[(block_tiled_m + m_in_block_tile + m_in_tile + 8) * n +
+    block_tiled_n + n_in_block_tile + n_in_tile + 8],&frag_c[1][2]);
 }
 
 class GemmTensorCore_3 : public GemmBase {
@@ -159,9 +174,10 @@ class GemmTensorCore_3 : public GemmBase {
 
   void LaunchKernel(const half *d_A, const half *d_B, float *d_C, uint64_t m,
                     uint64_t n, uint64_t k) override {
-    dim3 blockdim(32);
-    dim3 griddim((n + TILE_SIZE - 1) / TILE_SIZE,
-                 (m + TILE_SIZE - 1) / TILE_SIZE);
+    uint64_t warp_per_block = BLOCK_TILE_SIZE / WARP_TILE_SIZE;
+    dim3 blockdim(32 * warp_per_block * warp_per_block);
+    dim3 griddim((n + BLOCK_TILE_SIZE - 1) / BLOCK_TILE_SIZE,
+                 (m + BLOCK_TILE_SIZE - 1) / BLOCK_TILE_SIZE);
     Kernel<<<griddim, blockdim>>>(d_A, d_B, d_C, m, n, k);
   }
 };
@@ -169,6 +185,7 @@ class GemmTensorCore_3 : public GemmBase {
 int main() {
   GemmTensorCore_3 gemm("GemmTensorCore_3");
   // mxnxk
+  // gemm.RunProfile(32, 32, 16);
   gemm.RunProfile(128, 128, 128);
   gemm.RunProfile(128, 256, 256);
   gemm.RunProfile(256, 512, 512);
